@@ -82,7 +82,9 @@ final class AppIndex: ObservableObject {
 
     private let iconCache: NSCache<NSString, NSImage> = {
         let c = NSCache<NSString, NSImage>()
-        c.countLimit = 500
+        // Cap at 200 — UI rarely shows more than 50 icons at once,
+        // 200 covers the realistic scroll-back. NSCache evicts LRU.
+        c.countLimit = 200
         return c
     }()
     private let queue = DispatchQueue(label: "launcher.index", qos: .userInitiated)
