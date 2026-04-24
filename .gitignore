@@ -1,0 +1,25 @@
+# Swift build
+.build/
+Package.resolved
+.swiftpm/
+
+# Built artifacts
+Launcher.app/
+AppIcon.iconset/
+Resources/AppIcon.icns
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+
+# macOS
+.DS_Store
+
+# Claude Code
+.claude/
+
+# Editor
+.vscode/
+.idea/
+*.swp
