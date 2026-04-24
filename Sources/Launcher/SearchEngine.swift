@@ -1,48 +1,46 @@
 import Foundation
 
-struct ScoredApp {
-    let app: AppEntry
-    let score: Int
-    let matchRanges: [Range<String.Index>]
-}
-
 enum SearchEngine {
-    static func search(query: String, in apps: [AppEntry], recents: [String]) -> [AppEntry] {
+    /// Public entry. Operates on `IndexedApp` (pre-computed UTF-8 bytes).
+    static func search(query: String, in idx: [IndexedApp], recents: [String]) -> [AppEntry] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if q.isEmpty {
-            // Recents first, then alphabetic remainder.
             let recentSet = Set(recents)
-            let recentApps = recents.compactMap { path in apps.first(where: { $0.path == path }) }
-            let rest = apps.filter { !recentSet.contains($0.path) }
+            let recentApps = recents.compactMap { p in idx.first { $0.app.path == p }?.app }
+            let rest = idx.compactMap { recentSet.contains($0.app.path) ? nil : $0.app }
             return recentApps + rest
         }
 
+        // Pre-compute byte arrays for each query variant.
+        let variantBytes: [[UInt8]] = KeyboardLayout.variants(q).map { Array($0.utf8) }
+
+        // Recents → small bonus. Build once.
+        var recentBoost: [String: Int] = [:]
+        for (i, p) in recents.enumerated() { recentBoost[p] = max(0, 20 - i * 2) }
+
         var scored: [(AppEntry, Int)] = []
-        scored.reserveCapacity(apps.count)
+        scored.reserveCapacity(idx.count)
 
-        let recentBoostMap: [String: Int] = {
-            var m: [String: Int] = [:]
-            for (i, p) in recents.enumerated() {
-                m[p] = max(0, 20 - i * 2)
-            }
-            return m
-        }()
-
-        let variants = KeyboardLayout.variants(q)
-
-        for app in apps {
+        for ix in idx {
             var best: Int = -1
-            // Score against every alias (file name + CFBundleDisplayName + CFBundleName),
-            // take the max. Handles e.g. "Code.app" ↔ "Visual Studio Code" display name.
-            for alias in app.aliases {
-                for v in variants {
-                    if let s = score(query: v, name: alias), s > best { best = s }
+            // Iterate aliases × variants. Aliases are typically 1-3, variants 1-3.
+            for ai in 0..<ix.aliasBytes.count {
+                let n = ix.aliasBytes[ai]
+                let words = ix.aliasWords[ai]
+                for v in variantBytes {
+                    if v.isEmpty { continue }
+                    if let s = scoreBytes(q: v, n: n, words: words), s > best {
+                        best = s
+                        if best >= 1000 { break } // exact match — can't beat
+                    }
                 }
+                if best >= 1000 { break }
             }
             if best < 0 { continue }
-            let boost = recentBoostMap[app.path] ?? 0
-            scored.append((app, best + boost))
+            let boost = recentBoost[ix.app.path] ?? 0
+            scored.append((ix.app, best + boost))
         }
+
         scored.sort { lhs, rhs in
             if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }
             return lhs.0.name.localizedCaseInsensitiveCompare(rhs.0.name) == .orderedAscending
@@ -50,44 +48,107 @@ enum SearchEngine {
         return scored.map { $0.0 }
     }
 
-    /// Returns nil if query does not match. Higher score = better.
-    static func score(query q: String, name n: String) -> Int? {
-        if q.isEmpty { return 0 }
-        if n == q { return 1000 }
-        if n.hasPrefix(q) { return 500 + max(0, 50 - n.count) }
+    /// Byte-level scorer. Returns nil if no match. Higher score = better.
+    /// Tier order: exact (1000) > prefix (500) > word-prefix (300) > substring (200) > subseq (50+).
+    @inline(__always)
+    static func scoreBytes(q: [UInt8], n: [UInt8], words: [[UInt8]]) -> Int? {
+        let qc = q.count
+        let nc = n.count
+        if qc == 0 { return 0 }
+        if qc > nc { return nil }
 
-        // Word-prefix: any whitespace/punct-delimited word starts with q
-        let words = n.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        // Exact
+        if qc == nc && bytesEqual(q, n) { return 1000 }
+
+        // Prefix
+        if hasPrefix(n, q) { return 500 + max(0, 50 - nc) }
+
+        // Word-prefix
         for w in words {
-            if w.hasPrefix(q) { return 300 + max(0, 50 - n.count) }
+            if hasPrefix(w, q) { return 300 + max(0, 50 - nc) }
         }
 
-        // Substring contains
-        if n.contains(q) { return 200 + max(0, 50 - n.count) }
+        // Substring (Boyer-Moore-Horspool would be overkill; q is tiny)
+        if containsBytes(haystack: n, needle: q) { return 200 + max(0, 50 - nc) }
 
-        // Subsequence (fuzzy). Reward contiguous runs.
-        guard let runs = subsequenceRuns(q: q, n: n) else { return nil }
-        return 50 + runs - n.count / 4
+        // Subsequence (all bytes of q appear in n in order)
+        if let runs = subseqRuns(q: q, n: n) {
+            return 50 + runs - nc / 4
+        }
+        return nil
     }
 
-    /// If q is a subsequence of n, return number of contiguous runs (higher = better).
-    /// Nil if not a subsequence.
-    private static func subsequenceRuns(q: String, n: String) -> Int? {
-        var qi = q.startIndex
-        var ni = n.startIndex
+    @inline(__always)
+    private static func bytesEqual(_ a: [UInt8], _ b: [UInt8]) -> Bool {
+        if a.count != b.count { return false }
+        return a.withUnsafeBufferPointer { ap in
+            b.withUnsafeBufferPointer { bp in
+                memcmp(ap.baseAddress, bp.baseAddress, a.count) == 0
+            }
+        }
+    }
+
+    @inline(__always)
+    private static func hasPrefix(_ n: [UInt8], _ q: [UInt8]) -> Bool {
+        if q.count > n.count { return false }
+        return n.withUnsafeBufferPointer { np in
+            q.withUnsafeBufferPointer { qp in
+                memcmp(np.baseAddress, qp.baseAddress, q.count) == 0
+            }
+        }
+    }
+
+    @inline(__always)
+    private static func containsBytes(haystack: [UInt8], needle: [UInt8]) -> Bool {
+        let nc = needle.count
+        let hc = haystack.count
+        if nc == 0 { return true }
+        if nc > hc { return false }
+        return haystack.withUnsafeBufferPointer { hp in
+            needle.withUnsafeBufferPointer { np in
+                guard let hbase = hp.baseAddress, let nbase = np.baseAddress else { return false }
+                let limit = hc - nc
+                let first = nbase.pointee
+                var i = 0
+                while i <= limit {
+                    if hbase[i] == first {
+                        if memcmp(hbase + i, nbase, nc) == 0 { return true }
+                    }
+                    i += 1
+                }
+                return false
+            }
+        }
+    }
+
+    /// Returns "10 - run count" (so higher is better, more contiguous), or nil.
+    @inline(__always)
+    private static func subseqRuns(q: [UInt8], n: [UInt8]) -> Int? {
+        let qc = q.count
+        let nc = n.count
+        var qi = 0
+        var ni = 0
         var runs = 0
         var inRun = false
-        while qi < q.endIndex && ni < n.endIndex {
-            if q[qi] == n[ni] {
-                if !inRun { runs += 1; inRun = true }
-                qi = q.index(after: qi)
-            } else {
-                inRun = false
+        q.withUnsafeBufferPointer { qp in
+            n.withUnsafeBufferPointer { np in
+                while qi < qc && ni < nc {
+                    if qp[qi] == np[ni] {
+                        if !inRun { runs += 1; inRun = true }
+                        qi += 1
+                    } else {
+                        inRun = false
+                    }
+                    ni += 1
+                }
             }
-            ni = n.index(after: ni)
         }
-        if qi < q.endIndex { return nil }
-        // Fewer runs = better (more contiguous). Invert so higher=better.
+        if qi < qc { return nil }
         return max(0, 10 - runs)
+    }
+
+    // Legacy wrapper for `--probe` and self-test that still pass `[AppEntry]`.
+    static func search(query: String, in apps: [AppEntry], recents: [String]) -> [AppEntry] {
+        search(query: query, in: apps.map(IndexedApp.init), recents: recents)
     }
 }

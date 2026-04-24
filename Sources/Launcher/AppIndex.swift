@@ -31,10 +31,31 @@ struct AppEntry: Codable, Identifiable, Hashable {
     }
 }
 
+/// `AppEntry` plus pre-computed byte arrays for fast search.
+/// Building these once at index time turns scoring into byte-level loops
+/// instead of repeated grapheme-aware String ops.
+struct IndexedApp {
+    let app: AppEntry
+    /// Lowercased UTF-8 bytes for each alias.
+    let aliasBytes: [[UInt8]]
+    /// Words of each alias (split by non-alnum), as UTF-8 byte arrays.
+    let aliasWords: [[[UInt8]]]
+
+    init(_ app: AppEntry) {
+        self.app = app
+        self.aliasBytes = app.aliases.map { Array($0.utf8) }
+        self.aliasWords = app.aliases.map { alias in
+            alias.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+                .map { Array($0.utf8) }
+        }
+    }
+}
+
 final class AppIndex: ObservableObject {
     static let shared = AppIndex()
 
     @Published private(set) var apps: [AppEntry] = []
+    @Published private(set) var indexed: [IndexedApp] = []
     @Published private(set) var isReady: Bool = false
 
     private let searchRoots: [String] = [
@@ -70,10 +91,11 @@ final class AppIndex: ObservableObject {
 
     func loadCachedThenRefresh() {
         if let cached = readCache(), !cached.isEmpty {
-            // Drop stale paths before publishing (apps deleted since last scan).
             let valid = cached.filter { FileManager.default.fileExists(atPath: $0.path) }
+            let prebuilt = valid.map(IndexedApp.init)
             DispatchQueue.main.async {
                 self.apps = valid
+                self.indexed = prebuilt
                 self.isReady = true
             }
         }
@@ -85,8 +107,10 @@ final class AppIndex: ObservableObject {
         queue.async { [weak self] in
             guard let self else { return }
             let found = self.scanAll()
+            let prebuilt = found.map(IndexedApp.init)
             DispatchQueue.main.async {
                 self.apps = found
+                self.indexed = prebuilt
                 self.isReady = true
             }
             self.writeCache(found)

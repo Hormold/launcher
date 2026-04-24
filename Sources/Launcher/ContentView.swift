@@ -9,7 +9,7 @@ struct ContentView: View {
     @FocusState private var searchFocused: Bool
 
     private var results: [AppEntry] {
-        SearchEngine.search(query: query, in: index.apps, recents: recents)
+        SearchEngine.search(query: query, in: index.indexed, recents: recents)
     }
 
     private var visible: [AppEntry] {
