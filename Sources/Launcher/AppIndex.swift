@@ -127,7 +127,11 @@ final class AppIndex: ObservableObject {
             removeStale(path: entry.path)
             return false
         }
-        NSWorkspace.shared.open(entry.url)
+        // Async — returns immediately, doesn't wait for the target app to finish launching.
+        // Heavy apps (Docker, Xcode) used to freeze the launcher window for 1-3s.
+        let cfg = NSWorkspace.OpenConfiguration()
+        cfg.activates = true
+        NSWorkspace.shared.openApplication(at: entry.url, configuration: cfg, completionHandler: nil)
         return true
     }
 
@@ -226,11 +230,25 @@ final class AppIndex: ObservableObject {
         let plistURL = URL(fileURLWithPath: path).appendingPathComponent("Contents/Info.plist")
         if let data = try? Data(contentsOf: plistURL),
            let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] {
-            // Skip apps that don't want to appear in Dock/Cmd-Tab (agents, helpers, daemons).
-            if (plist["LSUIElement"] as? Bool) == true { return nil }
-            if (plist["LSUIElement"] as? String) == "1" { return nil }
+            // LSBackgroundOnly = pure daemon, never has UI. Always skip.
             if (plist["LSBackgroundOnly"] as? Bool) == true { return nil }
             if (plist["LSBackgroundOnly"] as? String) == "1" { return nil }
+
+            // LSUIElement = menubar/agent. Some are user-launchable (Docker), some are
+            // pure helpers (loginwindow, AirPlayUIAgent). Heuristic to keep the former:
+            //   - lives in /Applications or ~/Applications (user installed it deliberately)
+            //   - has an icon (helpers usually skip CFBundleIcon*)
+            // NSPrincipalClass intentionally NOT required — it defaults to NSApplication
+            // when absent, and Docker omits it.
+            let lsui = (plist["LSUIElement"] as? Bool) == true
+                    || (plist["LSUIElement"] as? String) == "1"
+            if lsui {
+                let userAppsPrefix = NSString(string: "~/Applications/").expandingTildeInPath
+                let inUserDir = path.hasPrefix("/Applications/") || path.hasPrefix(userAppsPrefix)
+                let hasIcon = (plist["CFBundleIconFile"] as? String)?.isEmpty == false
+                           || (plist["CFBundleIconName"] as? String)?.isEmpty == false
+                if !(inUserDir && hasIcon) { return nil }
+            }
 
             if let display = plist["CFBundleDisplayName"] as? String, !display.isEmpty {
                 aliases.append(display)
