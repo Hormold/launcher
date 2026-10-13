@@ -37,6 +37,18 @@ if [ ! -f "$BIN_PATH" ]; then
     BIN_PATH="$(swift build -c release --show-bin-path)/${APP_NAME}"
 fi
 
+echo "→ generating app icon"
+ICON_WORK_DIR="$(mktemp -d)"
+trap 'rm -rf "$ICON_WORK_DIR"' EXIT
+ICONSET_DIR="${ICON_WORK_DIR}/AppIcon.iconset"
+mkdir -p "$ICONSET_DIR"
+for size in 16 32 128 256 512; do
+    sips -z "$size" "$size" icon.png --out "${ICONSET_DIR}/icon_${size}x${size}.png" >/dev/null
+    double_size=$((size * 2))
+    sips -z "$double_size" "$double_size" icon.png --out "${ICONSET_DIR}/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$ICONSET_DIR" -o Resources/AppIcon.icns
+
 echo "→ assembling ${APP_DIR}"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS"
@@ -68,8 +80,9 @@ if [ "$DO_SIGN" = "1" ]; then
     spctl --assess --type execute --verbose=2 "$APP_DIR" 2>&1 | sed 's/^/    /' || true
 else
     # Ad-hoc sign (local use only).
-    codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1 || true
+    codesign --force --deep --sign - "$APP_DIR"
 fi
+codesign --verify --deep --strict "$APP_DIR"
 
 echo "✓ built $APP_DIR"
 
@@ -79,10 +92,9 @@ if [ "$DO_INSTALL" = "1" ]; then
     pkill -x "$APP_NAME" 2>/dev/null || true
     sleep 0.3
     # In-place replace contents (preserves /Applications dir inode).
-    mkdir -p "${INSTALL_DIR}/Contents/MacOS" "${INSTALL_DIR}/Contents/Resources"
-    cp "$APP_DIR/Contents/MacOS/${APP_NAME}" "${INSTALL_DIR}/Contents/MacOS/${APP_NAME}"
-    cp "$APP_DIR/Contents/Info.plist"          "${INSTALL_DIR}/Contents/Info.plist"
-    cp "$APP_DIR/Contents/Resources/AppIcon.icns" "${INSTALL_DIR}/Contents/Resources/AppIcon.icns"
+    mkdir -p "$INSTALL_DIR"
+    ditto "$APP_DIR" "$INSTALL_DIR"
+    codesign --verify --deep --strict "$INSTALL_DIR"
     touch "$INSTALL_DIR"
     /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$INSTALL_DIR" >/dev/null 2>&1 || true
     killall Dock 2>/dev/null || true
@@ -90,8 +102,8 @@ if [ "$DO_INSTALL" = "1" ]; then
 fi
 
 if [ "$DO_RUN" = "1" ]; then
-    TARGET="${INSTALL_DIR}"
-    [ -d "$TARGET" ] || TARGET="$APP_DIR"
+    TARGET="$APP_DIR"
+    [ "$DO_INSTALL" = "0" ] || TARGET="$INSTALL_DIR"
     echo "→ launching $TARGET"
     pkill -x "$APP_NAME" 2>/dev/null || true
     sleep 0.2

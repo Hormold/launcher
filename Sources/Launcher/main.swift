@@ -10,6 +10,12 @@ if let i = args.firstIndex(of: "--probe") {
     exit(0)
 }
 
+if let i = args.firstIndex(of: "--agent-probe") {
+    let q = i + 1 < args.count ? args[i + 1] : ""
+    CLI.agentProbe(query: q)
+    exit(0)
+}
+
 if args.contains("--self-test") {
     exit(CLI.selfTest() ? 0 : 1)
 }
@@ -47,18 +53,39 @@ enum CLI {
         let scanMs = Date().timeIntervalSince(t0) * 1000
         print("[bench] scan: \(apps.count) apps in \(String(format: "%.1f", scanMs)) ms")
 
+        let indexStart = DispatchTime.now().uptimeNanoseconds
+        let indexed = SearchIndex(apps)
+        let indexMs = Double(DispatchTime.now().uptimeNanoseconds - indexStart) / 1_000_000
+        print("[bench] prepare index: \(String(format: "%.2f", indexMs)) ms")
+
         let queries = ["notion", "chrome", "safari", "finder", "code", "term", "ntn",
                        "тщешщт", "noti", "1", "a", "xyz", "asdfghjkl", ""]
         let iterations = 1000 / queries.count
-        let t1 = Date()
+        let t1 = DispatchTime.now().uptimeNanoseconds
+        var matches = 0
         for _ in 0..<iterations {
             for q in queries {
-                _ = SearchEngine.search(query: q, in: apps, recents: [])
+                matches += SearchEngine.search(query: q, in: indexed, recents: []).count
             }
         }
-        let searchMs = Date().timeIntervalSince(t1) * 1000
+        let searchMs = Double(DispatchTime.now().uptimeNanoseconds - t1) / 1_000_000
         let total = iterations * queries.count
         print("[bench] search: \(total) queries in \(String(format: "%.1f", searchMs)) ms  avg=\(String(format: "%.3f", searchMs / Double(total))) ms")
+        print("[bench] matches: \(matches)")
+    }
+
+    static func agentProbe(query: String) {
+        let sessions = AgentCatalog.shared.scanSync()
+        let indexed = SearchIndex(sessions.map(\.appEntry))
+        print("[agent-probe] indexed: \(sessions.count) sessions")
+        print("[agent-probe] query: \"\(query)\"  agentIntent=\(AgentCatalog.hasAgentIntent(query))")
+        guard AgentCatalog.hasAgentIntent(query) else { return }
+        let results = SearchEngine.search(query: query, in: indexed, recents: [])
+        print("[agent-probe] top 10:")
+        for (i, entry) in results.prefix(10).enumerated() {
+            guard let session = sessions.first(where: { $0.id == entry.path }) else { continue }
+            print("  \(i + 1). \(session.name)  [\(session.shortPath)]")
+        }
     }
 
     static func integrity() -> Bool {
@@ -140,10 +167,12 @@ enum CLI {
 
         // T12: corrupt cache recovery
         print("[test] corrupt cache")
-        let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("Launcher/index.json")
+        let cacheURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("launcher-cache-test-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: cacheURL) }
         try? "not-json".write(to: cacheURL, atomically: true, encoding: .utf8)
-        // After corrupt write, next scan should still succeed.
+        expect("corrupt cache rejected and removed", AppIndex.readCache(at: cacheURL) == nil
+               && !FileManager.default.fileExists(atPath: cacheURL.path))
         let recovered = AppIndex.shared.scanSync()
         expect("scan works after corrupt cache", recovered.count > 0)
 

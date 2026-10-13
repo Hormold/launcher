@@ -40,14 +40,38 @@ struct IndexedApp {
     let aliasBytes: [[UInt8]]
     /// Words of each alias (split by non-alnum), as UTF-8 byte arrays.
     let aliasWords: [[[UInt8]]]
+    let aliasMasks: [UInt64]
 
     init(_ app: AppEntry) {
         self.app = app
         self.aliasBytes = app.aliases.map { Array($0.utf8) }
+        self.aliasMasks = aliasBytes.map(Self.byteMask)
         self.aliasWords = app.aliases.map { alias in
             alias.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
                 .map { Array($0.utf8) }
         }
+    }
+
+    static func byteMask(_ bytes: [UInt8]) -> UInt64 {
+        bytes.reduce(0) { $0 | (UInt64(1) << ($1 & 63)) }
+    }
+}
+
+struct SearchIndex {
+    let entries: [IndexedApp]
+    let alphabeticalRanks: [Int]
+    let offsetsByPath: [String: Int]
+
+    init(_ apps: [AppEntry] = []) {
+        entries = apps.map(IndexedApp.init)
+        let sorted = apps.indices.sorted {
+            apps[$0].name.localizedCaseInsensitiveCompare(apps[$1].name) == .orderedAscending
+        }
+        var ranks = [Int](repeating: 0, count: apps.count)
+        for (rank, offset) in sorted.enumerated() { ranks[offset] = rank }
+        alphabeticalRanks = ranks
+        offsetsByPath = Dictionary(apps.enumerated().map { ($0.element.path, $0.offset) },
+                                   uniquingKeysWith: { first, _ in first })
     }
 }
 
@@ -55,7 +79,7 @@ final class AppIndex: ObservableObject {
     static let shared = AppIndex()
 
     @Published private(set) var apps: [AppEntry] = []
-    @Published private(set) var indexed: [IndexedApp] = []
+    @Published private(set) var indexed = SearchIndex()
     @Published private(set) var isReady: Bool = false
 
     private let searchRoots: [String] = [
@@ -92,13 +116,16 @@ final class AppIndex: ObservableObject {
     private var refreshDebounceItem: DispatchWorkItem?
 
     func loadCachedThenRefresh() {
-        if let cached = readCache(), !cached.isEmpty {
-            let valid = cached.filter { FileManager.default.fileExists(atPath: $0.path) }
-            let prebuilt = valid.map(IndexedApp.init)
-            DispatchQueue.main.async {
-                self.apps = valid
-                self.indexed = prebuilt
-                self.isReady = true
+        queue.async { [weak self] in
+            guard let self else { return }
+            if let cached = Self.readCache(at: self.cacheURL), !cached.isEmpty {
+                let valid = cached.filter { FileManager.default.fileExists(atPath: $0.path) }
+                let prebuilt = SearchIndex(valid)
+                DispatchQueue.main.async {
+                    self.apps = valid
+                    self.indexed = prebuilt
+                    self.isReady = true
+                }
             }
         }
         refresh()
@@ -109,8 +136,9 @@ final class AppIndex: ObservableObject {
         queue.async { [weak self] in
             guard let self else { return }
             let found = self.scanAll()
-            let prebuilt = found.map(IndexedApp.init)
+            let prebuilt = SearchIndex(found)
             DispatchQueue.main.async {
+                guard self.apps != found || !self.isReady else { return }
                 self.apps = found
                 self.indexed = prebuilt
                 self.isReady = true
@@ -144,14 +172,13 @@ final class AppIndex: ObservableObject {
     }
 
     private func removeStale(path: String) {
-        DispatchQueue.main.async {
-            self.apps.removeAll { $0.path == path }
-        }
+        let remaining = apps.filter { $0.path != path }
+        apps = remaining
+        indexed = SearchIndex(remaining)
         iconCache.removeObject(forKey: path as NSString)
         // Persist async.
         queue.async { [weak self] in
             guard let self else { return }
-            let remaining = self.apps.filter { $0.path != path }
             self.writeCache(remaining)
         }
     }
@@ -281,7 +308,7 @@ final class AppIndex: ObservableObject {
 
     // MARK: - cache
 
-    private func readCache() -> [AppEntry]? {
+    static func readCache(at cacheURL: URL) -> [AppEntry]? {
         guard let data = try? Data(contentsOf: cacheURL) else { return nil }
         do {
             return try JSONDecoder().decode([AppEntry].self, from: data)

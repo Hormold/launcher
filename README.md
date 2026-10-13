@@ -13,6 +13,7 @@ macOS Launchpad was removed in Tahoe. Spotlight does too much. Raycast/Alfred ar
 - **Keyboard layout aware.** Accidentally typed `тщешщт` on the Russian layout? Finds Notion.
 - **Recents.** Apps you open often rank higher.
 - **Auto-reindex.** FSEvents watcher — new apps appear without relaunching.
+- **Agent quick start.** Type `codex launcher`, `claude skipcalls`, or `agent backend` to open a coding-agent session in a terminal tab.
 - **No dependencies.** Pure Swift + SwiftUI + AppKit.
 
 ## Install
@@ -26,6 +27,7 @@ First launch: right-click → **Open** (ad-hoc signed, Gatekeeper needs the over
 ### From source
 
 Requires macOS 14+, Xcode command-line tools.
+The build creates the app icon from `icon.png` and packages a universal arm64/x86_64 app.
 
 ```bash
 git clone https://github.com/hormold/launcher.git
@@ -38,7 +40,10 @@ bash build.sh --install --run
 - Click the dock icon → search field is focused, type → **Enter** opens top match.
 - **↑** / **↓** — navigate results.
 - **Esc** — hide the window.
+- `codex <project>`, `claude <project>`, or `agent <project>` — open a new coding-agent session in the last active terminal app. Projects are discovered from `~/dev` and one level below it.
 - Search looks in `/Applications`, `~/Applications`, `/System/Applications`, Utilities, Setapp, CoreServices/Applications, and Finder.
+
+Agent sessions prefer the last active terminal (`Ghostty`, `iTerm2`, or Terminal). Ghostty and Terminal tab reuse rely on macOS UI scripting, so macOS may ask for Accessibility permission the first time.
 
 ## Pin to dock
 
@@ -66,10 +71,16 @@ The binary has hidden diagnostic modes that run without UI:
 
 ```
 Launcher --probe "notion"    # show top 10 matches + variants
+Launcher --agent-probe "codex launcher" # show top 10 agent session matches
 Launcher --self-test         # run scenario test suite
 Launcher --bench             # scan + search timing
 Launcher --integrity         # verify indexed apps still exist
 ```
+
+Run deterministic search regressions with `swift test -c release`. The benchmark
+reports index preparation separately and reuses the prepared index, as the UI does.
+GitHub Actions runs these tests and builds a downloadable `Launcher.zip` on each
+push to `main` and pull request.
 
 ## Architecture
 
@@ -77,6 +88,7 @@ Launcher --integrity         # verify indexed apps still exist
 | --- | --- |
 | `LauncherApp.swift` | `@main`, window lifecycle, dock-reopen handling |
 | `AppIndex.swift`    | `/Applications` scan, cache, FSEvents watcher |
+| `AgentLauncher.swift`| coding-agent session discovery + terminal-tab launch |
 | `FSWatcher.swift`   | `FSEventStream` wrapper for auto-reindex |
 | `SearchEngine.swift`| fuzzy scorer: exact > prefix > word > substring > subsequence |
 | `KeyboardLayout.swift`| QWERTY ↔ ЙЦУКЕН key-position swap |

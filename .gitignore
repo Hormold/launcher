@@ -5,6 +5,7 @@ Package.resolved
 
 # Built artifacts
 Launcher.app/
+Launcher-v*.zip
 AppIcon.iconset/
 Resources/AppIcon.icns
 

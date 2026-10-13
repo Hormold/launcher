@@ -3,17 +3,21 @@ import AppKit
 
 struct ContentView: View {
     @StateObject private var index = AppIndex.shared
+    @StateObject private var agents = AgentCatalog.shared
     @State private var query: String = ""
     @State private var selection: Int = 0
     @State private var recents: [String] = Recents.load()
+    @State private var visible: [LaunchResult] = []
+    @State private var resultsQuery: String = ""
     @FocusState private var searchFocused: Bool
 
-    private var results: [AppEntry] {
-        SearchEngine.search(query: query, in: index.indexed, recents: recents)
-    }
-
-    private var visible: [AppEntry] {
-        Array(results.prefix(50))
+    private func updateResults() {
+        let apps = SearchEngine.search(query: query, in: index.indexed, recents: recents)
+            .map(LaunchResult.app)
+        let agentSessions = agents.search(query: query).map(LaunchResult.agent)
+        visible = Array((agentSessions + apps).prefix(50))
+        resultsQuery = query
+        selection = 0
     }
 
     var body: some View {
@@ -28,6 +32,8 @@ struct ContentView: View {
         )
         .ignoresSafeArea()
         .onAppear {
+            agents.loadIfNeeded()
+            updateResults()
             forceFocus()
         }
         .onReceive(NotificationCenter.default.publisher(for: .launcherShouldFocus)) { _ in
@@ -35,7 +41,10 @@ struct ContentView: View {
             selection = 0
             forceFocus()
         }
-        .onChange(of: query) { _, _ in selection = 0 }
+        .onChange(of: query) { _, _ in updateResults() }
+        .onChange(of: index.apps) { _, _ in updateResults() }
+        .onChange(of: agents.sessions) { _, _ in updateResults() }
+        .onChange(of: recents) { _, _ in updateResults() }
     }
 
     private var searchBar: some View {
@@ -72,16 +81,15 @@ struct ContentView: View {
         } else {
             ScrollViewReader { proxy in
                 ScrollView {
-                    VStack(spacing: 2) {
-                        ForEach(Array(visible.enumerated()), id: \.element.id) { idx, app in
+                    LazyVStack(spacing: 2) {
+                        ForEach(Array(visible.enumerated()), id: \.element.id) { idx, result in
                             ResultRow(
-                                app: app,
-                                icon: index.icon(for: app),
+                                result: result,
+                                icon: { icon(for: result) },
                                 selected: idx == selection
                             )
-                            .id(idx)
                             .contentShape(Rectangle())
-                            .onTapGesture(count: 2) { launch(app) }
+                            .onTapGesture(count: 2) { launch(result) }
                             .onTapGesture { selection = idx }
                         }
                     }
@@ -90,7 +98,9 @@ struct ContentView: View {
                 }
                 .onChange(of: selection) { _, new in
                     withAnimation(.easeOut(duration: 0.08)) {
-                        proxy.scrollTo(new, anchor: .center)
+                        if visible.indices.contains(new) {
+                            proxy.scrollTo(visible[new].id, anchor: .center)
+                        }
                     }
                 }
             }
@@ -118,29 +128,54 @@ struct ContentView: View {
     // MARK: - actions
 
     private func move(_ dir: Int) {
+        if resultsQuery != query { updateResults() }
         let count = visible.count
         guard count > 0 else { return }
         selection = (selection + dir + count) % count
     }
 
     private func open() {
+        if resultsQuery != query { updateResults() }
         guard selection < visible.count else { return }
         launch(visible[selection])
     }
 
-    private func launch(_ app: AppEntry) {
-        let ok = AppIndex.shared.open(app)
-        if ok {
-            Recents.record(app.path)
-            recents = Recents.load()
-            hide()
-        } else {
-            // App was deleted since index. Drop from recents, keep window open.
-            Recents.forget(app.path)
-            recents = Recents.load()
-            selection = 0
+    private func launch(_ result: LaunchResult) {
+        switch result {
+        case .app(let app):
+            let ok = AppIndex.shared.open(app)
+            if ok {
+                Recents.record(app.path)
+                recents = Recents.load()
+                hide()
+            } else {
+                // App was deleted since index. Drop from recents, keep window open.
+                Recents.forget(app.path)
+                recents = Recents.load()
+                selection = 0
+            }
+        case .agent(let session):
+            if AgentCatalog.shared.open(session) {
+                AgentRecents.record(session.id)
+                hide()
+            } else {
+                agents.refresh()
+                selection = 0
+            }
         }
     }
+
+    private func icon(for result: LaunchResult) -> NSImage {
+        switch result {
+        case .app(let app):
+            return index.icon(for: app)
+        case .agent:
+            return Self.terminalIcon
+        }
+    }
+
+    private static let terminalIcon = NSImage(systemSymbolName: "terminal", accessibilityDescription: "Terminal")
+        ?? NSWorkspace.shared.icon(forFile: "/System/Applications/Utilities/Terminal.app")
 
     private func hide() {
         query = ""
@@ -176,23 +211,56 @@ struct ContentView: View {
     }
 }
 
+enum LaunchResult: Identifiable, Hashable {
+    case app(AppEntry)
+    case agent(AgentSession)
+
+    var id: String {
+        switch self {
+        case .app(let app): return "app:\(app.id)"
+        case .agent(let session): return session.id
+        }
+    }
+
+    var name: String {
+        switch self {
+        case .app(let app): return app.name
+        case .agent(let session): return session.name
+        }
+    }
+
+    var shortPath: String {
+        switch self {
+        case .app(let app):
+            let p = app.path
+            if p.hasPrefix("/Applications/") { return "Applications" }
+            if p.hasPrefix("/System/Applications/Utilities/") { return "Utilities" }
+            if p.hasPrefix("/System/Applications/") { return "System" }
+            if p.contains("/Applications/") { return "User" }
+            return (p as NSString).deletingLastPathComponent
+        case .agent(let session):
+            return session.shortPath
+        }
+    }
+}
+
 struct ResultRow: View {
-    let app: AppEntry
-    let icon: NSImage
+    let result: LaunchResult
+    let icon: () -> NSImage
     let selected: Bool
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(nsImage: icon)
+            Image(nsImage: icon())
                 .resizable()
                 .interpolation(.high)
                 .frame(width: 28, height: 28)
-            Text(app.name)
+            Text(result.name)
                 .font(.system(size: 15))
                 .lineLimit(1)
                 .foregroundStyle(selected ? Color.white : Color.primary)
             Spacer()
-            Text(shortPath)
+            Text(result.shortPath)
                 .font(.system(size: 11))
                 .foregroundStyle(selected ? Color.white.opacity(0.85) : Color.secondary)
                 .lineLimit(1)
@@ -203,15 +271,6 @@ struct ResultRow: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(selected ? Color.accentColor.opacity(0.9) : Color.clear)
         )
-    }
-
-    private var shortPath: String {
-        let p = app.path
-        if p.hasPrefix("/Applications/") { return "Applications" }
-        if p.hasPrefix("/System/Applications/Utilities/") { return "Utilities" }
-        if p.hasPrefix("/System/Applications/") { return "System" }
-        if p.contains("/Applications/") { return "User" }
-        return (p as NSString).deletingLastPathComponent
     }
 }
 

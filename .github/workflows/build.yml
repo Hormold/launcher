@@ -1,0 +1,35 @@
+name: Build Launcher
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test search behavior
+        run: swift test -c release
+      - name: Build universal app
+        run: bash build.sh
+      - name: Package app
+        run: ditto -c -k --sequesterRsrc --keepParent Launcher.app Launcher.zip
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Launcher-macOS-universal
+          path: Launcher.zip
+          if-no-files-found: error
+          retention-days: 14

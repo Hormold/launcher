@@ -61,6 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         AppIndex.shared.loadCachedThenRefresh()
+        TerminalCommandLauncher.shared.startTracking()
         // Observe key changes ONLY on our main window — not arbitrary system panels.
         NotificationCenter.default.addObserver(
             forName: NSWindow.didBecomeKeyNotification,
